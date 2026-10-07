@@ -97,6 +97,72 @@ def budgets(out_dir):
     print()
 
 
+def sdk_mode(out_dir):
+    """Show that generate_sdk=True writes a typed accessor alongside the JSON.
+
+    The generated <key>_sdk.py lets an agent call load_field("key") to fetch
+    only one field, rather than cat-ing the whole JSON into its context.
+    """
+    result = serialize(
+        {
+            "report": {
+                "title": "Q3 Performance Report",
+                "executive_summary": (
+                    "Revenue grew 18 % year-over-year driven by the enterprise "
+                    "segment.  Margin expansion of 2.4 pp reflects operating "
+                    "leverage. " * 400
+                ),
+                "metrics": {
+                    "revenue_usd": 4_820_000,
+                    "gross_margin_pct": 61.3,
+                    "headcount": 312,
+                },
+                "recommendations": [
+                    "Accelerate enterprise sales hiring",
+                    "Reduce cloud spend via reserved instances",
+                    "Launch APAC expansion in Q1",
+                ],
+            }
+        },
+        out_dir / "sdk",
+        SerializeConfig(max_value_size=300, generate_sdk=True),
+    )
+
+    print("=" * 70)
+    print("5. SDK mode: typed accessor generated alongside the JSON file")
+    print("=" * 70)
+    print(result.overview_text)
+
+    for key, json_path in result.files.items():
+        sdk_path = result.sdk_files.get(key)
+        print(f"[full JSON]  {key} -> {json_path}  ({json_path.stat().st_size:,} bytes)")
+        if sdk_path:
+            print(f"[typed SDK]  {key} -> {sdk_path}")
+
+    print()
+    print("--- What the SDK docstring looks like (schema at a glance) ---")
+    if result.sdk_files:
+        sdk_path = next(iter(result.sdk_files.values()))
+        # Print just the module docstring so the demo stays readable.
+        src = sdk_path.read_text(encoding="utf-8")
+        doc_end = src.index('"""', 3) + 3
+        print(src[:doc_end])
+
+    print()
+    print("--- Agent fetches only 'metrics' via load_field, not the whole file ---")
+    import importlib.util
+    if result.sdk_files:
+        sdk_path = next(iter(result.sdk_files.values()))
+        root_class = result.items[0].sdk_class
+        spec = importlib.util.spec_from_file_location("_demo_sdk", sdk_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        cls = getattr(mod, root_class)
+        metrics = cls.load_field("metrics")
+        print(f"metrics = {metrics}")
+    print()
+
+
 def main():
     # Start clean so stale files from a previous run can't confuse the output.
     if DEMO_OUT.exists():
@@ -105,9 +171,11 @@ def main():
     rules(DEMO_OUT)
     objects(DEMO_OUT)
     budgets(DEMO_OUT)
+    sdk_mode(DEMO_OUT)
     print("=" * 70)
     print(f"All output kept at: {DEMO_OUT}")
     print("Try: cat demo_out/basic/overview.md")
+    print("     cat demo_out/sdk/report_sdk.py")
     print("=" * 70)
 
 

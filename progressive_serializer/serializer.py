@@ -13,6 +13,7 @@ from . import jsonc
 from .config import SerializeConfig
 from .fold import fold
 from .render import ItemView, OverviewContext, StringTemplateRenderer
+from .sdk_gen import generate_sdk
 
 OVERVIEW_NAME = "overview.md"
 
@@ -28,6 +29,9 @@ class SerializeResult:
     # Only keys that were folded and therefore spilled to disk.
     files: dict[str, Path] = field(default_factory=dict)
     items: list[ItemView] = field(default_factory=list)
+    # SDK files generated alongside the JSON files (key → sdk .py path).
+    # Only populated when SerializeConfig(generate_sdk=True).
+    sdk_files: dict[str, Path] = field(default_factory=dict)
 
 
 def serialize(
@@ -48,11 +52,13 @@ def serialize(
     out_path.mkdir(parents=True, exist_ok=True)
 
     renderer = config.renderer or StringTemplateRenderer(
-        folded_notice=config.messages.folded_notice
+        folded_notice=config.messages.folded_notice,
+        sdk_notice=config.messages.sdk_notice,
     )
     used_stems: dict[str, int] = {}
     items: list[ItemView] = []
     files: dict[str, Path] = {}
+    sdk_files: dict[str, Path] = {}
 
     for key, value in data.items():
         # Dumped once: this same text is both what we measure and what we spill.
@@ -79,11 +85,23 @@ def serialize(
 
         block, folded = _fold_to_budget(value, config)
         full_path: Optional[str] = None
+        sdk_path: Optional[str] = None
+        sdk_class: Optional[str] = None
         if folded:
             path = out_path / _unique_name(str(key), used_stems)
             path.write_text(full_text, encoding="utf-8")
             files[str(key)] = path
             full_path = str(path)
+
+            if config.generate_sdk:
+                import json as _json
+                sdk_source, sdk_class = generate_sdk(
+                    str(key), _json.loads(full_text), path
+                )
+                sdk_file = path.with_name(path.stem + "_sdk.py")
+                sdk_file.write_text(sdk_source, encoding="utf-8")
+                sdk_files[str(key)] = sdk_file
+                sdk_path = str(sdk_file)
 
         items.append(
             ItemView(
@@ -93,6 +111,8 @@ def serialize(
                 full_path=full_path,
                 original_size=original_size,
                 rendered_size=config.size_fn(block),
+                sdk_path=sdk_path,
+                sdk_class=sdk_class,
             )
         )
 
@@ -107,6 +127,7 @@ def serialize(
         overview_text=overview_text,
         files=files,
         items=items,
+        sdk_files=sdk_files,
     )
 
 

@@ -75,8 +75,112 @@ print(result.overview_text)
 | `overview_path` / `overview_text` | `overview.md` 的路径与内容 |
 | `files` | `dict[key, Path]`，只含被折叠因而落盘的 key |
 | `items` | 每个 key 的渲染结果与尺寸统计 |
+| `sdk_files` | `dict[key, Path]`，SDK `.py` 文件；仅 `generate_sdk=True` 时填充 |
 
 `serialize` **不清空**输出目录，只写 `overview.md` 和本次产生的 `<key>.json`。
+
+## SDK 模式：为落盘文件生成类型化访问器
+
+折叠落盘解决了"overview 太大"，但没解决另一个问题：**Agent 如果直接 `cat` 那个
+JSON 文件，上下文还是会被打满**——折叠等于白做。
+
+`generate_sdk=True` 会在每个落盘的 JSON 旁边再生成一个 `<key>_sdk.py`。
+Agent 通过 SDK 的 `load_field("key")` 只取自己关心的那个字段，不必把整个文件读进上下文。
+
+```python
+result = serialize(
+    {"report": {"title": "Q3", "body": "甲" * 50_000, "metrics": {...}}},
+    "/tmp/out",
+    SerializeConfig(generate_sdk=True, messages=CHINESE),
+)
+```
+
+输出目录：
+
+```
+/tmp/out/
+  overview.md
+  report.json        # 完整原文，5 万多字
+  report_sdk.py      # 类型化访问器
+```
+
+`overview.md` 的提示语会同时指向两个文件，并点明根类名：
+
+```
+部分字段由于过长已被自动折叠, 完整内容见 `/tmp/out/report.json`。
+请使用 `/tmp/out/report_sdk.py` (类 `Report`) 按需读取字段，避免一次性加载整个文件。
+```
+
+`report_sdk.py` 开头就是 schema docstring——Agent 只读文件头部即可掌握结构，
+**完全不用碰 JSON**：
+
+```python
+"""
+Read-only SDK for report.json
+
+Schema (Report):
+    title: str
+    body: str
+    metrics: dict
+        revenue_usd: int
+        gross_margin_pct: float
+
+Usage:
+    obj = Report.load()
+    val = Report.load_field('some_key')
+"""
+```
+
+接着是与 schema 对应的 dataclass，每个类都带 `_from_dict`，保证嵌套对象能正确构造：
+
+```python
+@dataclass
+class Metrics:
+    revenue_usd: Optional[int] = None
+    gross_margin_pct: Optional[float] = None
+
+    @classmethod
+    def _from_dict(cls, d: dict) -> "Metrics": ...
+
+@dataclass
+class Report:
+    title: Optional[str] = None
+    body: Optional[str] = None
+    metrics: Optional[Metrics] = None
+
+    @classmethod
+    def load(cls) -> "Report": ...             # 完整对象
+
+    @classmethod
+    def load_field(cls, key: str) -> Any: ...  # 只取一个字段
+```
+
+Agent 按需取用：
+
+```python
+import importlib.util
+
+spec = importlib.util.spec_from_file_location("sdk", "/tmp/out/report_sdk.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+# 只取一个字段
+metrics = mod.Report.load_field("metrics")
+# → {"revenue_usd": 4820000, "gross_margin_pct": 61.3}
+```
+
+`SerializeResult.sdk_files` 与 `files` 结构一致，按 key 索引 SDK 路径：
+
+```python
+result.sdk_files["report"]   # Path("/tmp/out/report_sdk.py")
+result.items[0].sdk_class    # "Report"
+result.items[0].sdk_path     # "/tmp/out/report_sdk.py"
+```
+
+只有**真的发生折叠并落盘**的 key 才会生成 SDK。没超 `max_value_size` 的值直接内联在
+overview 里，不产 SDK。`generate_sdk=False`（默认）时不会写任何 `.py` 文件。
+
+> 设计动机、schema 推断算法与边界取舍见 [docs/sdk-mode.md](docs/sdk-mode.md)。
 
 ## 折叠规则
 
@@ -225,4 +329,5 @@ python3 demo.py                              # 跑一遍各类场景，输出留
 
 - [docs/DESIGN.md](docs/DESIGN.md) —— 整体架构与设计决策
 - [docs/folding-algorithm.md](docs/folding-algorithm.md) —— 折叠算法详解
+- [docs/sdk-mode.md](docs/sdk-mode.md) —— SDK 模式设计：动机、schema 推断、实现约束
 - [README.md](README.md) —— English

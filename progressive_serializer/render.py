@@ -41,6 +41,10 @@ class ItemView:
     original_size: int
     # Size of what actually goes into overview.md.
     rendered_size: int
+    # Path to the generated Python SDK file, or None when SDK was not requested.
+    sdk_path: Optional[str] = None
+    # Name of the root dataclass in the SDK, or None when SDK was not generated.
+    sdk_class: Optional[str] = None
 
 
 @dataclass
@@ -61,6 +65,7 @@ class StringTemplateRenderer:
         *,
         item_template: str = DEFAULT_ITEM_TEMPLATE,
         folded_notice: Optional[str] = None,
+        sdk_notice: Optional[str] = None,
         header: str = DEFAULT_HEADER,
         footer: str = DEFAULT_FOOTER,
         separator: str = DEFAULT_SEPARATOR,
@@ -68,6 +73,10 @@ class StringTemplateRenderer:
         self.item_template = Template(item_template)
         self.folded_notice = Template(
             DEFAULT_FOLDED_NOTICE if folded_notice is None else folded_notice
+        )
+        from .messages import ENGLISH
+        self.sdk_notice = Template(
+            ENGLISH.sdk_notice if sdk_notice is None else sdk_notice
         )
         self.header = header
         self.footer = footer
@@ -81,9 +90,18 @@ class StringTemplateRenderer:
     def render_item(self, item: ItemView, ctx: OverviewContext) -> str:
         notice = ""
         if item.folded and item.full_path:
-            notice = self.folded_notice.substitute(
-                key=item.key, full_path=item.full_path, out_dir=ctx.out_dir
-            )
+            if item.sdk_path and item.sdk_class:
+                notice = self.sdk_notice.substitute(
+                    key=item.key,
+                    full_path=item.full_path,
+                    sdk_path=item.sdk_path,
+                    sdk_class=item.sdk_class,
+                    out_dir=ctx.out_dir,
+                )
+            else:
+                notice = self.folded_notice.substitute(
+                    key=item.key, full_path=item.full_path, out_dir=ctx.out_dir
+                )
         # Values are not rescanned by substitute(), so a "$" inside json_block
         # is safe; only the template itself needs "$$".
         return self.item_template.substitute(

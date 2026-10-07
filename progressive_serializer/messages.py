@@ -35,6 +35,14 @@ class Messages:
         "Oversized fields were folded automatically; "
         "full content at `${full_path}`\n\n"
     )
+    # Notice appended when a typed SDK was also generated alongside the JSON.
+    # Variables: ``${full_path}``, ``${sdk_path}``, ``${sdk_class}``.
+    sdk_notice: str = (
+        "Oversized fields were folded automatically; "
+        "full content at `${full_path}`. "
+        "Use `${sdk_path}` (class `${sdk_class}`) to load only the fields you need "
+        "instead of reading the whole file.\n\n"
+    )
 
 
 ENGLISH = Messages()
@@ -47,4 +55,9 @@ CHINESE = Messages(
     depth_object_folded="已折叠，嵌套过深 (共 {total} 个字段)",
     depth_list_folded="已折叠，嵌套过深 (共 {total} 项)",
     folded_notice="部分字段由于过长已被自动折叠, 完整内容见 `${full_path}`\n\n",
+    sdk_notice=(
+        "部分字段由于过长已被自动折叠, 完整内容见 `${full_path}`。"
+        "请使用 `${sdk_path}` (类 `${sdk_class}`) 按需读取字段，"
+        "避免一次性加载整个文件。\n\n"
+    ),
 )

@@ -71,9 +71,116 @@ Return value:
 | `overview_path` / `overview_text` | Path to and content of `overview.md` |
 | `files` | `dict[key, Path]` — only keys that were folded and spilled |
 | `items` | Per-key render result and size stats |
+| `sdk_files` | `dict[key, Path]` — SDK `.py` files, only when `generate_sdk=True` |
 
 `serialize` does **not** wipe the output directory; it only writes `overview.md`
 and the `<key>.json` files it produces.
+
+## SDK mode: typed accessor for folded files
+
+When `generate_sdk=True`, each JSON file that spills to disk gets a companion
+`<key>_sdk.py` alongside it. The SDK lets an agent call `load_field("key")` to
+fetch exactly one field, so it never has to read the whole file into context.
+
+```python
+result = serialize(
+    {"report": {"title": "Q3", "body": "…" * 50_000, "metrics": {…}}},
+    "/tmp/out",
+    SerializeConfig(generate_sdk=True),
+)
+```
+
+Output directory:
+
+```
+/tmp/out/
+  overview.md
+  report.json        # full payload, 50k+ chars
+  report_sdk.py      # typed accessor
+```
+
+The `overview.md` notice now points at both files and names the root class:
+
+```
+Oversized fields were folded automatically; full content at `/tmp/out/report.json`.
+Use `/tmp/out/report_sdk.py` (class `Report`) to load only the fields you need
+instead of reading the whole file.
+```
+
+`report_sdk.py` opens with a schema docstring so an agent reading just the top
+of the file immediately knows the structure — without touching the JSON:
+
+```python
+"""
+Read-only SDK for report.json
+
+Schema (Report):
+    title: str
+    body: str
+    metrics: dict
+        revenue_usd: int
+        gross_margin_pct: float
+
+Usage:
+    obj = Report.load()
+    val = Report.load_field('some_key')
+"""
+```
+
+Then typed dataclasses mirror the schema, with `_from_dict` on every class so
+nested objects hydrate correctly:
+
+```python
+@dataclass
+class Metrics:
+    revenue_usd: Optional[int] = None
+    gross_margin_pct: Optional[float] = None
+
+    @classmethod
+    def _from_dict(cls, d: dict) -> "Metrics": ...
+
+@dataclass
+class Report:
+    title: Optional[str] = None
+    body: Optional[str] = None
+    metrics: Optional[Metrics] = None
+
+    @classmethod
+    def load(cls) -> "Report": ...          # full object
+
+    @classmethod
+    def load_field(cls, key: str) -> Any: ...  # one field only
+```
+
+The agent fetches only what it needs:
+
+```python
+import importlib.util, pathlib
+
+spec = importlib.util.spec_from_file_location("sdk", "/tmp/out/report_sdk.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+# One field — reads only the bytes needed to extract it.
+metrics = mod.Report.load_field("metrics")
+# → {"revenue_usd": 4820000, "gross_margin_pct": 61.3}
+```
+
+`SerializeResult.sdk_files` maps each key to its SDK path, mirroring `files`:
+
+```python
+result.sdk_files["report"]   # Path("/tmp/out/report_sdk.py")
+result.items[0].sdk_class    # "Report"
+result.items[0].sdk_path     # "/tmp/out/report_sdk.py"
+```
+
+SDK files are only written for keys that actually fold and spill to disk.
+Values that fit within `max_value_size` are inlined in the overview and get no
+SDK. If `generate_sdk=False` (the default), no `.py` files are written.
+
+> The design rationale, schema inference algorithm, and edge-case decisions are
+> documented in [docs/sdk-mode.md](docs/sdk-mode.md).
+
 
 ## Folding rules
 
@@ -235,4 +342,5 @@ Docs:
 
 - [docs/DESIGN.md](docs/DESIGN.md) — architecture and design decisions
 - [docs/folding-algorithm.md](docs/folding-algorithm.md) — the folding algorithm in depth
+- [docs/sdk-mode.md](docs/sdk-mode.md) — SDK mode design: why, schema inference, constraints
 - [README-zh.md](README-zh.md) — 中文文档

@@ -62,6 +62,11 @@ class SerializeConfig:
     # How many times to retry with tightened thresholds when one round of
     # folding still leaves the value over budget.
     escalate_rounds: int = 3
+    # When True, write a ``<key>_sdk.py`` beside each ``<key>.json`` that
+    # spills to disk.  The SDK exposes typed dataclasses mirroring the JSON
+    # schema and ``load_field()`` so an agent can fetch only the fields it
+    # needs rather than loading the whole file.
+    generate_sdk: bool = False
 
     def tightened(self) -> "SerializeConfig":
         """A copy with the folding thresholds stepped down one notch.
