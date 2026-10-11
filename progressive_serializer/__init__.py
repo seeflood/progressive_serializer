@@ -6,6 +6,12 @@ Turn a dict of oversized values into a compact ``overview.md`` plus full
     >>> from progressive_serializer import serialize
     >>> result = serialize({"doc": {...}}, "/tmp/out")
     >>> print(result.overview_text)
+
+Or fold a single value into a bare JSONC string you can splice into a larger
+document yourself:
+
+    >>> from progressive_serializer import serialize_value
+    >>> print(serialize_value({...}, "/tmp/out/report.json"))
 """
 
 from .config import Renderer, SerializeConfig
@@ -19,10 +25,16 @@ from .render import (
     OverviewContext,
     StringTemplateRenderer,
 )
-from .serializer import OVERVIEW_NAME, SerializeResult, serialize
+from .serializer import (
+    OVERVIEW_NAME,
+    SerializeResult,
+    serialize,
+    serialize_value,
+)
 
 __all__ = [
     "serialize",
+    "serialize_value",
     "SerializeConfig",
     "SerializeResult",
     "Renderer",

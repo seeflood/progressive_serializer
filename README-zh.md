@@ -79,20 +79,95 @@ print(result.overview_text)
 
 `serialize` **不清空**输出目录，只写 `overview.md` 和本次产生的 `<key>.json`。
 
-## SDK 模式：为落盘文件生成类型化访问器
+## `serialize_value`：单个数据结构，返回纯 JSONC 字符串
 
-折叠落盘解决了"overview 太大"，但没解决另一个问题：**Agent 如果直接 `cat` 那个
-JSON 文件，上下文还是会被打满**——折叠等于白做。
-
-`generate_sdk=True` 会在每个落盘的 JSON 旁边再生成一个 `<key>_sdk.py`。
-Agent 通过 SDK 的 `load_field("key")` 只取自己关心的那个字段，不必把整个文件读进上下文。
+`serialize` 接管整个输出：传入一个 dict，产出一份 `overview.md`。
+如果 prompt 是你自己拼的，只想把**这一个值**折叠掉，就用 `serialize_value`——
+它接收单个数据结构（JSON 或 class 对象）和落盘文件路径，只返回 JSONC 文本本身：
+没有 markdown、没有代码围栏、没有 key 标题，因此可以直接拼进你自己更大的
+JSON / JSONC 字符串里。
 
 ```python
-result = serialize(
-    {"report": {"title": "Q3", "body": "甲" * 50_000, "metrics": {...}}},
-    "/tmp/out",
-    SerializeConfig(generate_sdk=True, messages=CHINESE),
-)
+from progressive_serializer import SerializeConfig, serialize_value
+
+block = serialize_value(report, "/tmp/out/report.json",
+                        SerializeConfig(generate_sdk=True))
+print(block)
+```
+
+```jsonc
+{  /* Oversized fields were folded automatically; full content at
+      `/tmp/out/report.json`. The file may be large, so avoid reading it in full
+      unless you really do need every field in the JSON. If you only care about
+      certain fields, write a Python script that calls `/tmp/out/report_sdk.py`
+      (class `Report`) to read just those fields. */
+  "title": "...",  /* folded, 21 chars originally */
+  "executive_summary": "...",  /* folded, 49600 chars originally */
+  "finance": {  /* folded, nested too deep (1 field) */
+    "...": "..."
+  },
+  "teams": [  /* folded, nested too deep (2 items) */
+    "..."
+  ]
+}
+```
+
+`serialize` 写在代码块上方的那句提示语，在这里变成第一行的注释，
+保证返回值自包含。提示语同样受 `messages=CHINESE` 控制。
+
+### 注释风格
+
+这个模式下**所有**注释都是 `/* … */` 块注释，而不是 `//`。原因在于 `//` 没有
+结束符、一直吃到行尾：一条长到需要换行的注释（或被读者终端软换行的注释），
+与"JSON 的下一行"在视觉上无法区分。`*/` 明确标出每条注释到哪里结束。
+全局统一成一种风格，也省得读者同时记两套约定。
+
+| | `comment_style="line"` | `comment_style="block"` |
+| --- | --- | --- |
+| 形式 | `// note` | `/* note */` |
+| 谁的默认值 | `serialize` | `serialize_value` |
+| 能否换行 | 不能 | 能，按 `comment_width` |
+
+`serialize` 保持 `//`：它的 JSON 放在 markdown 代码围栏里，注释后面不会有任何
+东西被误读成它的续行。两个 API 都接受任意一种风格：
+
+```python
+serialize_value(data, path, SerializeConfig(comment_style="line"))   # 强制用 //
+serialize(data, out_dir, SerializeConfig(comment_style="block"))     # 强制用 /* … */
+```
+
+块注释按 `SerializeConfig(comment_width=88)` 换行，传 `0` 则不换行。
+不含空格的长串（比如文件路径）不会被拆开——打印路径的意义就在于能被整条复制。
+`"line"` 风格下 `comment_width` 被忽略，因为 `//` 不能换行。
+
+| | `serialize` | `serialize_value` |
+| --- | --- | --- |
+| 入参 | `dict[key, value]` + 输出**目录** | 单个值 + 输出**文件** |
+| 返回 | `SerializeResult`，写 `overview.md` | `str`（JSONC），不写 `overview.md` |
+| 提示语 | 代码块上方的正文 | 第一行的 `/* … */` 注释 |
+| 注释风格 | `//` | `/* … */` |
+| `config.renderer` | 生效 | 忽略——没有模板可渲染 |
+
+命名规则沿用输出文件名的 stem，对应 `serialize` 里的 key：
+`report.json` 生成 `report_sdk.py`，根类名为 `Report`。父目录不存在时自动创建。
+
+如果值本身没超过 `max_value_size`，则不折叠、**不落盘**，直接返回
+`json.dumps` 的原始输出，不带任何注释。
+
+跑 `python3 demo_serialize_value.py` 看完整演示：拼接、SDK 模式、class 对象、
+中文提示语，以及与 `serialize` 的逐项对比。
+
+## SDK 模式：为落盘文件生成类型化访问器
+
+折叠落盘解决了"overview 太大"，但没解决另一个问题：**Agent 手里只有 `cat`**。
+它想看某个字段时只能把 5 万字全读回来，折叠省下的上下文当场还回去。
+
+根因是落盘文件对 Agent 是个**黑盒**——它不知道里面有什么，所以只能全读。
+`generate_sdk=True` 在 JSON 旁边再生成一个 `<key>_sdk.py`，给它一张**地图**（schema）
+和一把**镊子**（`get("a.b.c")`）。
+
+```python
+result = serialize({"report": {...}}, "/tmp/out", SerializeConfig(generate_sdk=True))
 ```
 
 输出目录：
@@ -107,12 +182,16 @@ result = serialize(
 `overview.md` 的提示语会同时指向两个文件，并点明根类名：
 
 ```
-部分字段由于过长已被自动折叠, 完整内容见 `/tmp/out/report.json`。
-请使用 `/tmp/out/report_sdk.py` (类 `Report`) 按需读取字段，避免一次性加载整个文件。
+部分字段由于过长已被自动折叠, 完整内容见 `/tmp/out/report.json`。由于文件内容
+可能较大，请尽量避免直接读取完整文件内容(除非你确实需要看 json 的所有字段)。
+如果你只关心 json 中的某些字段，你可以通过写 python 脚本、调用
+`/tmp/out/report_sdk.py` (类 `Report`) 来按需读取字段。
 ```
 
-`report_sdk.py` 开头就是 schema docstring——Agent 只读文件头部即可掌握结构，
-**完全不用碰 JSON**：
+### schema docstring
+
+`report_sdk.py` 开头是完整 schema——**覆盖每一层**，包括对象列表的元素类型。
+Agent 只读文件头部就能掌握整个结构，**完全不用碰 JSON**：
 
 ```python
 """
@@ -120,42 +199,37 @@ Read-only SDK for report.json
 
 Schema (Report):
     title: str
-    body: str
-    metrics: dict
-        revenue_usd: int
-        gross_margin_pct: float
+    executive_summary: str
+    finance: dict
+        quarter: dict
+            metrics: dict
+                revenue: dict
+                    total_usd: int
+                    by_region: dict
+                        amer: int
+                        emea: int
+                gross_margin_pct: float
+    teams: list[dict]
+        [each item]
+            name: str
+            lead: dict
+                name: str
+                email: str
+            headcount: int
 
 Usage:
-    obj = Report.load()
-    val = Report.load_field('some_key')
+    Report.get('a.b.c')        # one field, dotted path
+    Report.get('items.0.id')   # list index as a path segment
+    Report.keys('a.b')         # what is under a node
+    Report.load()              # whole payload, typed
 """
 ```
 
-接着是与 schema 对应的 dataclass，每个类都带 `_from_dict`，保证嵌套对象能正确构造：
+schema 的体积只与**字段数量**相关，与数据量无关——50 MB 的文件也是这个开销。
 
-```python
-@dataclass
-class Metrics:
-    revenue_usd: Optional[int] = None
-    gross_margin_pct: Optional[float] = None
+### 按路径取值
 
-    @classmethod
-    def _from_dict(cls, d: dict) -> "Metrics": ...
-
-@dataclass
-class Report:
-    title: Optional[str] = None
-    body: Optional[str] = None
-    metrics: Optional[Metrics] = None
-
-    @classmethod
-    def load(cls) -> "Report": ...             # 完整对象
-
-    @classmethod
-    def load_field(cls, key: str) -> Any: ...  # 只取一个字段
-```
-
-Agent 按需取用：
+`get()` 接受点分路径，只返回那一个值；整数段表示列表下标：
 
 ```python
 import importlib.util
@@ -163,13 +237,39 @@ import importlib.util
 spec = importlib.util.spec_from_file_location("sdk", "/tmp/out/report_sdk.py")
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
+Report = mod.Report
 
-# 只取一个字段
-metrics = mod.Report.load_field("metrics")
-# → {"revenue_usd": 4820000, "gross_margin_pct": 61.3}
+Report.get("finance.quarter.metrics.revenue.by_region.emea")   # 1720000
+Report.get("teams.1.lead.email")                               # 'bo@example.com'
+Report.get("nope.at.all", default=None)                        # 不抛异常，返回 None
 ```
 
-`SerializeResult.sdk_files` 与 `files` 结构一致，按 key 索引 SDK 路径：
+`keys()` 用于**先探索再取值**——对象返回 key 列表，列表返回长度，标量返回类型名：
+
+```python
+Report.keys("finance.quarter.metrics")   # ['revenue', 'gross_margin_pct']
+Report.keys("teams")                     # 2
+Report.keys("teams.0")                   # ['name', 'lead', 'headcount']
+```
+
+路径不存在时抛 `KeyError` 并指明**断在哪一段**
+（`no such path: 'metrics.nope' (in 'metrics.nope.deeper')`），除非传了 `default`。
+
+### 类型化 dataclass
+
+**每一层**对象都会生成 dataclass；对象列表还会生成单数化的元素类
+（`teams` → `Team`），整棵树都有类型：
+
+```python
+obj = Report.load()
+obj.finance.quarter.metrics.revenue.total_usd   # 4820000
+[t.lead.name for t in obj.teams]                # ['Ann Lee', 'Bo Chen']
+```
+
+所有字段都是 `Optional[...] = None`——JSON 里 key 可能缺失，且 dataclass 不允许
+无默认值字段排在有默认值字段之后。
+
+### 返回值字段
 
 ```python
 result.sdk_files["report"]   # Path("/tmp/out/report_sdk.py")
@@ -177,10 +277,11 @@ result.items[0].sdk_class    # "Report"
 result.items[0].sdk_path     # "/tmp/out/report_sdk.py"
 ```
 
-只有**真的发生折叠并落盘**的 key 才会生成 SDK。没超 `max_value_size` 的值直接内联在
-overview 里，不产 SDK。`generate_sdk=False`（默认）时不会写任何 `.py` 文件。
+只有**真的折叠并落盘**的 key 才生成 SDK；没超 `max_value_size` 的值直接内联在
+overview 里，不产 SDK。`generate_sdk=False`（默认）时不写任何 `.py`，
+overview 输出与该功能引入前**逐字符一致**。
 
-> 设计动机、schema 推断算法与边界取舍见 [docs/sdk-mode.md](docs/sdk-mode.md)。
+> 设计动机、schema 推断与已知限制见 [docs/sdk-mode.md](docs/sdk-mode.md)。
 
 ## 折叠规则
 
@@ -191,11 +292,20 @@ overview 里，不产 SDK。`generate_sdk=False`（默认）时不会写任何 `
 | 长字符串 → `"..."` | `max_string_len=200` |
 | 二进制（`bytes`/`bytearray`/`memoryview`）→ 占位 | `fold_binary=True` |
 | 长列表 → 只留前 N 项 | `max_list_items=10`, `list_preview_items=1` |
-| 宽对象 → 只留前 N 个字段 | `max_object_keys=20` |
-| 过深嵌套 → `{}` / `[]` | `max_depth=6` |
+| 宽对象 → 只留前 N 个字段 | `max_object_keys=None`（**默认关闭**，传整数才启用） |
+| 过深嵌套 → `{}` / `[]` | `max_depth=10` |
 
 折叠一轮后若仍超预算（比如"字段很多但每个都不大"），会按梯度收紧阈值重试，
-最多 `escalate_rounds=3` 轮。
+最多 `escalate_rounds=3` 轮。升级只会收紧**已启用**的规则——关闭状态的
+`max_object_keys` 不会被偷偷打开。
+
+丢字段是唯一**默认关闭**的规则：其他规则触发时都会在原地留下可见的占位符，
+但被省略的字段是**直接消失**的——Agent 根本看不出它存在，而字段名正是
+Agent 的导航信息。如果你宁愿丢字段名也不愿超预算，再显式打开：
+
+```python
+SerializeConfig(max_object_keys=20)
+```
 
 > 折叠算法的完整说明（设计取舍、调参指引、已知限制）见
 > [docs/folding-algorithm.md](docs/folding-algorithm.md)。
@@ -312,7 +422,10 @@ SerializeConfig(renderer=JinjaRenderer(env, "overview.md.j2"))
 ## 注意
 
 - 完整文件里的二进制是 **base64 字符串**，不是原始字节。
-- key 会被 sanitize 成安全文件名（`a/b` → `a_b.json`），碰撞时加计数后缀。
+- key 会被 sanitize 成安全文件名，碰撞时加计数后缀。**Unicode 会保留**
+  （`搜索结果` → `搜索结果.json`），分隔符、控制字符与 shell 元字符替换为 `_`
+  （`a/b` → `a_b.json`）。长度上限是 180 **字节**（POSIX 限制的是字节数）。
+  目标平台为 macOS 与 Linux，不特殊处理 Windows 保留名。
   overview 里引用的始终是真实落盘的文件名。
 - 输入含循环引用时抛 `ValueError`（来自 `json.dumps` 的环检测）。
 - 预算升级不保证收敛：**没有规则会缩短字段名**，所以 key 本身极长的值可能
@@ -323,6 +436,7 @@ SerializeConfig(renderer=JinjaRenderer(env, "overview.md.j2"))
 ```bash
 python3 -m unittest discover -s tests -t .   # 测试（无需第三方包）
 python3 demo.py                              # 跑一遍各类场景，输出留在 ./demo_out/
+python3 demo_serialize_value.py              # serialize_value() 专项演示
 ```
 
 文档：

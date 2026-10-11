@@ -150,7 +150,7 @@ def _fold_dict(
 
     keys = list(value.keys())
     dropped = 0
-    if len(keys) > config.max_object_keys:
+    if config.max_object_keys is not None and len(keys) > config.max_object_keys:
         dropped = len(keys) - config.max_object_keys
         keys = keys[: config.max_object_keys]
 

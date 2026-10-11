@@ -80,6 +80,18 @@ class TestObjectFolding(unittest.TestCase):
     def test_narrow_object_survives(self):
         self.assertEqual(tree({"a": 1}, max_object_keys=5), {"a": 1})
 
+    def test_rule_disabled_by_default(self):
+        # max_object_keys is opt-in: without it, a 500-key object keeps every
+        # field, because dropping fields costs the agent its navigation info.
+        data = {f"k{i}": i for i in range(500)}
+        node = tree(data)
+        self.assertEqual(node, data)
+        self.assertNotIn(ELLIPSIS, node)
+
+    def test_explicit_none_disables_rule(self):
+        data = {f"k{i}": i for i in range(50)}
+        self.assertEqual(tree(data, max_object_keys=None), data)
+
     def test_wide_object_keeps_leading_keys(self):
         data = {f"k{i}": i for i in range(10)}
         node = tree(data, max_object_keys=3)
@@ -92,6 +104,46 @@ class TestObjectFolding(unittest.TestCase):
         # True is not included: True == 1 in Python, so it would collide.
         node = tree({1: "a", None: "b", 2.5: "c", False: "d"}, max_object_keys=9)
         self.assertEqual(set(node), {"1", "null", "2.5", "false"})
+
+
+class TestTightened(unittest.TestCase):
+    """Escalation tightens opted-in rules; it never enables new ones."""
+
+    def test_disabled_object_rule_stays_disabled(self):
+        cfg = SerializeConfig()
+        self.assertIsNone(cfg.max_object_keys)
+        for _ in range(5):
+            cfg = cfg.tightened()
+            self.assertIsNone(cfg.max_object_keys)
+
+    def test_enabled_object_rule_steps_down(self):
+        cfg = SerializeConfig(max_object_keys=20)
+        self.assertEqual(cfg.tightened().max_object_keys, 10)
+        self.assertEqual(cfg.tightened().tightened().max_object_keys, 5)
+
+    def test_enabled_object_rule_floors_at_one(self):
+        cfg = SerializeConfig(max_object_keys=2)
+        for _ in range(5):
+            cfg = cfg.tightened()
+        self.assertEqual(cfg.max_object_keys, 1)
+
+    def test_depth_halves_and_floors_at_one(self):
+        # Halving, not -1: convergence must not depend on where max_depth
+        # started, or a deep default would outlast escalate_rounds.
+        cfg = SerializeConfig()
+        self.assertEqual(cfg.max_depth, 10)
+        steps = []
+        for _ in range(4):
+            cfg = cfg.tightened()
+            steps.append(cfg.max_depth)
+        self.assertEqual(steps, [5, 2, 1, 1])
+
+    def test_deep_value_converges_within_default_rounds(self):
+        # The reason depth halves: three rounds must be enough to bite.
+        cfg = SerializeConfig()
+        for _ in range(3):
+            cfg = cfg.tightened()
+        self.assertLessEqual(cfg.max_depth, 2)
 
 
 class TestDepthFolding(unittest.TestCase):
@@ -112,6 +164,22 @@ class TestDepthFolding(unittest.TestCase):
 
     def test_scalars_at_depth_survive(self):
         self.assertEqual(tree({"a": {"b": 1}}, max_depth=2), {"a": {"b": 1}})
+
+    def test_default_depth_keeps_ten_levels(self):
+        # Pins the default: a 10-level chain survives untouched, the 11th folds.
+        def chain(levels):
+            node = {"leaf": 1}
+            for _ in range(levels - 1):
+                node = {"child": node}
+            return node
+
+        self.assertEqual(tree(chain(10)), chain(10))
+
+        node = tree(chain(11))
+        for _ in range(9):
+            node = node["child"]
+        self.assertIsInstance(node["child"], Folded)
+        self.assertEqual(node["child"].kind, "depth")
 
 
 class TestCoercion(unittest.TestCase):

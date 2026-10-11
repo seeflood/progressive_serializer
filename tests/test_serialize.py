@@ -130,7 +130,71 @@ class TestFilenames(SerializeTestCase):
         self.assertEqual(_safe_stem("/"), "item")
         self.assertEqual(_safe_stem("../../etc/passwd"), "etc_passwd")
         self.assertEqual(_safe_stem("ok.name-1"), "ok.name-1")
-        self.assertEqual(len(_safe_stem("x" * 500)), 80)
+        # The cap is in bytes, since that is what POSIX limits.
+        self.assertEqual(len(_safe_stem("x" * 500).encode("utf-8")), 180)
+
+    def test_safe_stem_keeps_unicode(self):
+        # macOS and Linux both allow any byte but "/" and NUL, so a CJK key
+        # keeps a self-describing filename.
+        self.assertEqual(_safe_stem("搜索结果"), "搜索结果")
+        self.assertEqual(_safe_stem("日本語"), "日本語")
+
+    def test_safe_stem_replaces_shell_hostile_chars(self):
+        # The overview prints these paths for an agent to paste into a shell.
+        for key in ["a b", "a$b", "a|b", "a;b", "a'b", "a\tb", "a(b)"]:
+            stem = _safe_stem(key)
+            self.assertNotIn(" ", stem, f"for {key!r}")
+            self.assertTrue(stem.startswith("a"), f"for {key!r}")
+
+    def test_safe_stem_byte_cap_never_splits_a_character(self):
+        # 200 CJK chars is 600 bytes; the cut must land on a boundary.
+        stem = _safe_stem("中" * 200)
+        self.assertLessEqual(len(stem.encode("utf-8")), 180)
+        self.assertEqual(stem, "中" * 60)  # 60 * 3 bytes == 180
+
+    def test_unicode_key_round_trips_to_disk(self):
+        res = self.run_serialize(
+            {"搜索结果": {"正文": "甲" * 5000, "错误码": 0}}, max_value_size=200
+        )
+        path = res.files["搜索结果"]
+        self.assertEqual(path.name, "搜索结果.json")
+        self.assertTrue(path.exists())
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(loaded["正文"], "甲" * 5000)
+
+    def test_unicode_keys_collide_case_and_form_insensitively(self):
+        # NFC vs NFD spellings of the same name must not produce two files
+        # that collide once macOS normalizes them.
+        import unicodedata
+
+        big = {"s": "x" * 5000}
+        nfc = unicodedata.normalize("NFC", "café")
+        nfd = unicodedata.normalize("NFD", "café")
+        res = self.run_serialize(
+            {nfc: big, nfd: big}, max_value_size=100, max_string_len=10
+        )
+        names = {p.name for p in res.files.values()}
+        self.assertEqual(len(names), 2, names)
+
+    def test_traversal_attempts_stay_inside_out_dir(self):
+        # The sanitizer is the only thing standing between a caller-supplied
+        # key and an arbitrary write, so pin it explicitly.
+        keys = [
+            "../../etc/passwd",
+            "/etc/shadow",
+            "..",
+            "../..",
+            "a/../../b",
+            "....//....//x",
+        ]
+        res = self.run_serialize(
+            {k: {"s": "x" * 5000} for k in keys},
+            max_value_size=100,
+            max_string_len=10,
+        )
+        resolved = self.out.resolve()
+        for key, path in res.files.items():
+            self.assertEqual(path.resolve().parent, resolved, f"for {key!r}")
 
     def test_case_insensitive_collision(self):
         big = {"s": "x" * 5000}
@@ -141,13 +205,30 @@ class TestFilenames(SerializeTestCase):
 
 
 class TestEscalation(SerializeTestCase):
-    def test_many_small_fields_still_land_in_budget(self):
-        # No single rule fires at the default thresholds, so only escalation
-        # can bring this under budget.
+    def test_many_small_fields_land_in_budget_once_rule_enabled(self):
+        # No other rule fires on 400 tiny fields, so only max_object_keys
+        # plus escalation can bring this under budget.
         data = {f"field_{i}": f"value_{i}" for i in range(400)}
-        res = self.run_serialize({"k": data}, max_value_size=500)
+        res = self.run_serialize({"k": data}, max_value_size=500, max_object_keys=20)
         self.assertTrue(res.items[0].folded)
         self.assertLessEqual(res.items[0].rendered_size, 500)
+
+    def test_many_small_fields_stay_whole_by_default(self):
+        # max_object_keys is opt-in, so every field name survives even though
+        # that leaves the value over budget.
+        data = {f"field_{i}": f"value_{i}" for i in range(400)}
+        res = self.run_serialize({"k": data}, max_value_size=500)
+        self.assertFalse(res.items[0].folded)
+        self.assertGreater(res.items[0].rendered_size, 500)
+        self.assertIn("field_399", res.items[0].json_block)
+
+    def test_escalation_never_enables_a_disabled_object_rule(self):
+        # Escalation tightens rules the caller opted into; it must not switch
+        # max_object_keys on just because the value is still over budget.
+        data = {f"field_{i}": f"value_{i}" for i in range(400)}
+        res = self.run_serialize({"k": data}, max_value_size=100, escalate_rounds=10)
+        self.assertFalse(res.items[0].folded)
+        self.assertIn("field_399", res.items[0].json_block)
 
     def test_escalation_disabled_leaves_value_over_budget(self):
         data = {f"field_{i}": f"value_{i}" for i in range(400)}
@@ -364,3 +445,40 @@ class TestSpecExample(SerializeTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CommentStyleDefaults(unittest.TestCase):
+    """Each API's default comment style, and the override."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name) / "out"
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_serialize_defaults_to_line_comments(self):
+        # Its JSON sits in a fenced markdown block, so nothing after a "//"
+        # could be mistaken for the comment's continuation.
+        result = serialize(
+            {"doc": {"body": "x" * 5000}},
+            self.dir,
+            SerializeConfig(max_value_size=200),
+        )
+        self.assertIn("// folded, 5000 chars originally", result.overview_text)
+        self.assertNotIn("/*", result.overview_text)
+
+    def test_serialize_can_opt_into_block_comments(self):
+        result = serialize(
+            {"doc": {"body": "x" * 5000}},
+            self.dir,
+            SerializeConfig(max_value_size=200, comment_style="block"),
+        )
+        self.assertIn("/* folded, 5000 chars originally */", result.overview_text)
+        self.assertNotIn("//", result.overview_text)
+
+    def test_invalid_style_rejected(self):
+        with self.assertRaises(ValueError):
+            serialize(
+                {"doc": {"body": "x" * 5000}},
+                self.dir,
+                SerializeConfig(max_value_size=200, comment_style="hash"),
+            )

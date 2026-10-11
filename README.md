@@ -76,18 +76,99 @@ Return value:
 `serialize` does **not** wipe the output directory; it only writes `overview.md`
 and the `<key>.json` files it produces.
 
+## `serialize_value`: one value, a bare JSONC string
+
+`serialize` owns the whole output: a dict of keys in, an `overview.md` out.
+When you are assembling the prompt yourself and just want *this one value*
+folded, use `serialize_value` — it takes a single structure (JSON-ish or a
+class instance) plus the file to spill to, and returns nothing but the JSONC
+block. No markdown, no code fence, no key heading, so the result can be spliced
+straight into a larger JSON/JSONC document of your own.
+
+```python
+from progressive_serializer import SerializeConfig, serialize_value
+
+block = serialize_value(report, "/tmp/out/report.json",
+                        SerializeConfig(generate_sdk=True))
+print(block)
+```
+
+```jsonc
+{  /* Oversized fields were folded automatically; full content at
+      `/tmp/out/report.json`. The file may be large, so avoid reading it in full
+      unless you really do need every field in the JSON. If you only care about
+      certain fields, write a Python script that calls `/tmp/out/report_sdk.py`
+      (class `Report`) to read just those fields. */
+  "title": "...",  /* folded, 21 chars originally */
+  "executive_summary": "...",  /* folded, 49600 chars originally */
+  "finance": {  /* folded, nested too deep (1 field) */
+    "...": "..."
+  },
+  "teams": [  /* folded, nested too deep (2 items) */
+    "..."
+  ]
+}
+```
+
+The notice that `serialize` puts in prose above the block lands here as a
+comment on the first line, so the string stays self-contained.
+
+### Comment style
+
+Every comment in this mode is a `/* … */` **block** comment, not `//`. The
+reason is that `//` has no terminator: it runs to end of line, so a comment long
+enough to wrap — or one the reader's terminal soft-wraps — is indistinguishable
+from the next line of JSON. `*/` states where each note ends. Using one
+convention throughout also means a reader never has to track two.
+
+| | `comment_style="line"` | `comment_style="block"` |
+| --- | --- | --- |
+| Form | `// note` | `/* note */` |
+| Default for | `serialize` | `serialize_value` |
+| Can wrap | no | yes, at `comment_width` |
+
+`serialize` keeps `//`, because its JSON goes inside a fenced markdown block
+where nothing following a comment could be mistaken for its continuation.
+Either API accepts either style:
+
+```python
+serialize_value(data, path, SerializeConfig(comment_style="line"))   # // anyway
+serialize(data, out_dir, SerializeConfig(comment_style="block"))     # /* … */ anyway
+```
+
+Block comments wrap at `SerializeConfig(comment_width=88)`; pass `0` to keep
+each on one line. Long unbroken runs — a filesystem path — are never split,
+since the point of printing a path is that it can be copied. In `"line"` style
+`comment_width` is ignored, as `//` cannot wrap.
+
+| | `serialize` | `serialize_value` |
+| --- | --- | --- |
+| Input | `dict[key, value]` + out **dir** | one value + out **file** |
+| Output | `SerializeResult`, writes `overview.md` | `str` (JSONC), no `overview.md` |
+| Notice | prose line above the block | `/* … */` on the first line |
+| Comments | `//` | `/* … */` |
+| `config.renderer` | used | ignored — there is no template |
+
+Naming follows the out-file stem the way `serialize` follows the key:
+`report.json` gives `report_sdk.py` with root class `Report`. The parent
+directory is created if missing.
+
+If the value already fits `max_value_size`, nothing is folded, **no file is
+written**, and you get plain `json.dumps` output with no comments at all.
+
+Run `python3 demo_serialize_value.py` for a worked walkthrough: splicing,
+SDK mode, class objects, localization, and a side-by-side against `serialize`.
+
 ## SDK mode: typed accessor for folded files
 
 When `generate_sdk=True`, each JSON file that spills to disk gets a companion
-`<key>_sdk.py` alongside it. The SDK lets an agent call `load_field("key")` to
-fetch exactly one field, so it never has to read the whole file into context.
+`<key>_sdk.py` alongside it. It solves the problem folding alone does not: once
+the payload is in a file, an agent's only tool is `cat`, so it reads all 50k
+chars back and the saving is undone. The SDK gives it a map (the schema) and
+tweezers (`get("a.b.c")`) instead.
 
 ```python
-result = serialize(
-    {"report": {"title": "Q3", "body": "…" * 50_000, "metrics": {…}}},
-    "/tmp/out",
-    SerializeConfig(generate_sdk=True),
-)
+result = serialize({"report": {...}}, "/tmp/out", SerializeConfig(generate_sdk=True))
 ```
 
 Output directory:
@@ -99,16 +180,21 @@ Output directory:
   report_sdk.py      # typed accessor
 ```
 
-The `overview.md` notice now points at both files and names the root class:
+The `overview.md` notice points at both files and names the root class:
 
 ```
 Oversized fields were folded automatically; full content at `/tmp/out/report.json`.
-Use `/tmp/out/report_sdk.py` (class `Report`) to load only the fields you need
-instead of reading the whole file.
+The file may be large, so avoid reading it in full unless you really do need
+every field in the JSON. If you only care about certain fields, write a Python
+script that calls `/tmp/out/report_sdk.py` (class `Report`) to read just those
+fields.
 ```
 
-`report_sdk.py` opens with a schema docstring so an agent reading just the top
-of the file immediately knows the structure — without touching the JSON:
+### The schema docstring
+
+`report_sdk.py` opens with the complete schema — **every level**, including the
+element type of lists of objects. An agent that reads only the head of this file
+knows the whole structure without touching the JSON:
 
 ```python
 """
@@ -116,57 +202,81 @@ Read-only SDK for report.json
 
 Schema (Report):
     title: str
-    body: str
-    metrics: dict
-        revenue_usd: int
-        gross_margin_pct: float
+    executive_summary: str
+    finance: dict
+        quarter: dict
+            metrics: dict
+                revenue: dict
+                    total_usd: int
+                    by_region: dict
+                        amer: int
+                        emea: int
+                gross_margin_pct: float
+    teams: list[dict]
+        [each item]
+            name: str
+            lead: dict
+                name: str
+                email: str
+            headcount: int
 
 Usage:
-    obj = Report.load()
-    val = Report.load_field('some_key')
+    Report.get('a.b.c')        # one field, dotted path
+    Report.get('items.0.id')   # list index as a path segment
+    Report.keys('a.b')         # what is under a node
+    Report.load()              # whole payload, typed
 """
 ```
 
-Then typed dataclasses mirror the schema, with `_from_dict` on every class so
-nested objects hydrate correctly:
+The schema's size tracks field count, not payload size — so it stays cheap even
+for a 50 MB file.
+
+### Access by path
+
+`get()` takes a dotted path and returns just that value. Integer segments index
+into lists:
 
 ```python
-@dataclass
-class Metrics:
-    revenue_usd: Optional[int] = None
-    gross_margin_pct: Optional[float] = None
-
-    @classmethod
-    def _from_dict(cls, d: dict) -> "Metrics": ...
-
-@dataclass
-class Report:
-    title: Optional[str] = None
-    body: Optional[str] = None
-    metrics: Optional[Metrics] = None
-
-    @classmethod
-    def load(cls) -> "Report": ...          # full object
-
-    @classmethod
-    def load_field(cls, key: str) -> Any: ...  # one field only
-```
-
-The agent fetches only what it needs:
-
-```python
-import importlib.util, pathlib
+import importlib.util
 
 spec = importlib.util.spec_from_file_location("sdk", "/tmp/out/report_sdk.py")
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
+Report = mod.Report
 
-# One field — reads only the bytes needed to extract it.
-metrics = mod.Report.load_field("metrics")
-# → {"revenue_usd": 4820000, "gross_margin_pct": 61.3}
+Report.get("finance.quarter.metrics.revenue.by_region.emea")   # 1720000
+Report.get("teams.1.lead.email")                               # 'bo@example.com'
+Report.get("nope.at.all", default=None)                        # None instead of raising
 ```
 
-`SerializeResult.sdk_files` maps each key to its SDK path, mirroring `files`:
+`keys()` explores a node without pulling its values — object → key names,
+list → length, scalar → type name:
+
+```python
+Report.keys("finance.quarter.metrics")   # ['revenue', 'gross_margin_pct']
+Report.keys("teams")                     # 2
+Report.keys("teams.0")                   # ['name', 'lead', 'headcount']
+```
+
+A missing path raises `KeyError` naming the segment that failed
+(`no such path: 'metrics.nope' (in 'metrics.nope.deeper')`), unless you pass
+`default`.
+
+### Typed dataclasses
+
+Objects become dataclasses at **every depth**, and a list of objects gets a
+singularized element class (`teams` → `Team`), so the whole tree is typed:
+
+```python
+obj = Report.load()
+obj.finance.quarter.metrics.revenue.total_usd   # 4820000
+[t.lead.name for t in obj.teams]                # ['Ann Lee', 'Bo Chen']
+```
+
+Every field is `Optional[...] = None`, since JSON keys may be absent and
+dataclass forbids a non-default field after a defaulted one.
+
+### Result fields
 
 ```python
 result.sdk_files["report"]   # Path("/tmp/out/report_sdk.py")
@@ -174,13 +284,13 @@ result.items[0].sdk_class    # "Report"
 result.items[0].sdk_path     # "/tmp/out/report_sdk.py"
 ```
 
-SDK files are only written for keys that actually fold and spill to disk.
-Values that fit within `max_value_size` are inlined in the overview and get no
-SDK. If `generate_sdk=False` (the default), no `.py` files are written.
+SDK files are only written for keys that actually fold and spill to disk. Values
+within `max_value_size` are inlined in the overview and get no SDK. With
+`generate_sdk=False` (the default) no `.py` files are written, and the overview
+is byte-identical to before this feature existed.
 
-> The design rationale, schema inference algorithm, and edge-case decisions are
-> documented in [docs/sdk-mode.md](docs/sdk-mode.md).
-
+> Design rationale, schema inference, and known limits:
+> [docs/sdk-mode.md](docs/sdk-mode.md).
 
 ## Folding rules
 
@@ -192,12 +302,23 @@ A value is only folded (and spilled to a file) if its full JSON exceeds
 | Long string → `"..."` | `max_string_len=200` |
 | Binary (`bytes`/`bytearray`/`memoryview`) → placeholder | `fold_binary=True` |
 | Long list → keep leading N items | `max_list_items=10`, `list_preview_items=1` |
-| Wide object → keep leading N fields | `max_object_keys=20` |
-| Deep nesting → `{"...": "..."}` / `["..."]` | `max_depth=6` |
+| Wide object → keep leading N fields | `max_object_keys=None` (**off by default**, set an int to enable) |
+| Deep nesting → `{"...": "..."}` / `["..."]` | `max_depth=10` |
 
 If one pass still leaves the value over budget — e.g. "many fields, none of them
 individually large" — thresholds are tightened and retried, up to
-`escalate_rounds=3` times.
+`escalate_rounds=3` times. Escalation only tightens rules that are enabled; a
+disabled `max_object_keys` stays disabled.
+
+Dropping fields is the one rule that is **off by default**: every other rule
+leaves a visible placeholder where it fired, but an omitted field is simply
+gone — the agent cannot tell it exists, and field names are its navigation
+information. Enable it when you would rather lose field names than exceed the
+budget:
+
+```python
+SerializeConfig(max_object_keys=20)
+```
 
 > The folding algorithm is documented in full (design trade-offs, tuning guidance,
 > known limitations) in [docs/folding-algorithm.md](docs/folding-algorithm.md).
@@ -323,8 +444,12 @@ still governs the fold notes.
 ## Gotchas
 
 - Binary data in the spilled file is a **base64 string**, not raw bytes.
-- Keys are sanitized into safe filenames (`a/b` → `a_b.json`), with a counter
-  suffix on collision. The overview always cites the real on-disk filename.
+- Keys are sanitized into safe filenames, with a counter suffix on collision.
+  Unicode is preserved (`搜索结果` → `搜索结果.json`), while separators,
+  control characters and shell metacharacters become `_` (`a/b` → `a_b.json`).
+  The length cap is 180 **bytes**, since that is what POSIX limits. Targets
+  macOS and Linux; Windows-reserved names are not special-cased. The overview
+  always cites the real on-disk filename.
 - Input containing a circular reference raises `ValueError` (from `json.dumps`'
   own cycle detection).
 - Escalation is not guaranteed to converge: no rule shortens *field names*, so a
@@ -336,6 +461,7 @@ still governs the fold notes.
 ```bash
 python3 -m unittest discover -s tests -t .   # tests, no third-party packages needed
 python3 demo.py                              # walk through the scenarios; output kept in ./demo_out/
+python3 demo_serialize_value.py              # serialize_value() in depth
 ```
 
 Docs:

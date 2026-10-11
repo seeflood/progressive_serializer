@@ -40,8 +40,10 @@ class Messages:
     sdk_notice: str = (
         "Oversized fields were folded automatically; "
         "full content at `${full_path}`. "
-        "Use `${sdk_path}` (class `${sdk_class}`) to load only the fields you need "
-        "instead of reading the whole file.\n\n"
+        "The file may be large, so avoid reading it in full unless you really "
+        "do need every field in the JSON. If you only care about certain "
+        "fields, write a Python script that calls `${sdk_path}` "
+        "(class `${sdk_class}`) to read just those fields.\n\n"
     )
 
 
@@ -57,7 +59,9 @@ CHINESE = Messages(
     folded_notice="部分字段由于过长已被自动折叠, 完整内容见 `${full_path}`\n\n",
     sdk_notice=(
         "部分字段由于过长已被自动折叠, 完整内容见 `${full_path}`。"
-        "请使用 `${sdk_path}` (类 `${sdk_class}`) 按需读取字段，"
-        "避免一次性加载整个文件。\n\n"
+        "由于文件内容可能较大，请尽量避免直接读取完整文件内容"
+        "(除非你确实需要看 json 的所有字段)。"
+        "如果你只关心 json 中的某些字段，你可以通过写 python 脚本、"
+        "调用 `${sdk_path}` (类 `${sdk_class}`) 来按需读取字段。\n\n"
     ),
 )
