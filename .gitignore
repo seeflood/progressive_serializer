@@ -5,3 +5,5 @@ build/
 dist/
 .pytest_cache/
 demo_out/
+demo_tmp_out/
+tmp/*
