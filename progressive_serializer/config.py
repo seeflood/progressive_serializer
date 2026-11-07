@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Optional, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol, runtime_checkable
 
 from .messages import ENGLISH, Messages
+
+if TYPE_CHECKING:
+    from .fold import Folded
 
 
 @runtime_checkable
@@ -46,6 +49,9 @@ class SerializeConfig:
     max_depth: int = 10
     # bytes/bytearray/memoryview are folded regardless of length.
     fold_binary: bool = True
+    # Opt in for JSON strings containing non-whitespace ASCII control
+    # characters (e.g. protobuf buffers decoded as text).
+    fold_binary_strings: bool = False
 
     # --- hooks ---------------------------------------------------------
     # Measures the "size" of rendered JSON. Swap in a tokenizer to budget by
@@ -54,6 +60,9 @@ class SerializeConfig:
     # Converts objects json cannot serialize. Same contract as
     # ``json.dumps(default=...)``: return a JSON-serializable replacement.
     default: Optional[Callable[[Any], Any]] = None
+    # Return None for normal traversal, or a final annotated preview.
+    # Paths contain JSON keys / list indices. Called even below the size budget.
+    fold_hook: Optional[Callable[[tuple, Any], Optional["Folded"]]] = None
     # ``None`` means the built-in string.Template renderer.
     renderer: Optional[Renderer] = None
     # Prose for fold notes and the overview notice. Use messages.CHINESE or your

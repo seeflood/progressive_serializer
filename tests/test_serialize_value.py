@@ -7,7 +7,7 @@ import unittest
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 
-from progressive_serializer import CHINESE, Messages, SerializeConfig, serialize_value
+from progressive_serializer import CHINESE, Messages, SerializeConfig, serialize, serialize_value
 
 
 def strip_comments(jsonc_text: str) -> str:
@@ -45,6 +45,33 @@ class SerializeValueTests(unittest.TestCase):
         data = {"foo": "bar", "n": 1}
         out = serialize_value(data, self.out)
         self.assertEqual(out, json.dumps(data, indent=2, ensure_ascii=False))
+
+    def test_binary_string_detection_is_opt_in_and_preserves_full_json(self):
+        data = {"Buffer": "\x00\b\x14data", "length": 7}
+        plain = serialize_value(data, self.out)
+        self.assertEqual(plain, json.dumps(data, indent=2, ensure_ascii=False))
+        folded = serialize_value(
+            data, self.out, SerializeConfig(fold_binary_strings=True),
+        )
+        self.assertIn("folded binary (str,", folded)
+        self.assertEqual(json.loads(strip_comments(folded))["Buffer"], "...")
+        self.assertEqual(json.loads(self.out.read_text()), data)
+
+    def test_multiline_text_is_not_detected_as_binary(self):
+        data = {"text": "hello\nworld\r\n\tindented"}
+        text = serialize_value(
+            data, self.out, SerializeConfig(fold_binary_strings=True),
+        )
+        self.assertEqual(text, json.dumps(data, indent=2, ensure_ascii=False))
+        self.assertFalse(self.out.exists())
+
+    def test_serialize_also_folds_small_binary_strings(self):
+        data = {"Buffer": "\x00data", "length": 5}
+        result = serialize(
+            {"request": data}, self.dir, SerializeConfig(fold_binary_strings=True),
+        )
+        self.assertIn("folded binary", result.overview_text)
+        self.assertEqual(json.loads(result.files["request"].read_text()), data)
 
     def test_small_value_writes_no_file(self):
         serialize_value({"foo": "bar"}, self.out)

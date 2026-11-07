@@ -1,5 +1,20 @@
 # progressive_serializer
 
+For binary buffers decoded into JSON strings, opt in with
+`SerializeConfig(fold_binary_strings=True)`. Strings containing non-whitespace
+ASCII control characters are folded even when the full payload fits the size
+budget. Tabs, newlines and carriage returns alone do not trigger this rule.
+The persisted JSON preserves the original strings.
+
+Custom business rules can use `SerializeConfig(fold_hook=hook)`.
+`hook(path, value)` receives a tuple of JSON keys/list indices (root: `()`).
+Return `None` for normal traversal or `Folded(preview, note, kind)` for a final
+annotated preview, which default rules and budget escalation will not truncate.
+The original input is still persisted and used for SDK generation. Hooks run
+even below the size budget; unmatched small values remain unchanged.
+Hooks must be side-effect free because escalation can call them repeatedly.
+Exceptions propagate, and invalid return values raise `TypeError`.
+
 Progressive disclosure of oversized JSON for LLM agents: hand the agent a compact
 `overview.md`, and spill the folded-away content to `<key>.json` files it can read
 only when it actually needs them.

@@ -291,6 +291,7 @@ overview 输出与该功能引入前**逐字符一致**。
 | --- | --- |
 | 长字符串 → `"..."` | `max_string_len=200` |
 | 二进制（`bytes`/`bytearray`/`memoryview`）→ 占位 | `fold_binary=True` |
+| 含非空白 ASCII 控制字符的二进制字符串 → 占位（可选） | `fold_binary_strings=False` |
 | 长列表 → 只留前 N 项 | `max_list_items=10`, `list_preview_items=1` |
 | 宽对象 → 只留前 N 个字段 | `max_object_keys=None`（**默认关闭**，传整数才启用） |
 | 过深嵌套 → `{}` / `[]` | `max_depth=10` |
@@ -298,6 +299,10 @@ overview 输出与该功能引入前**逐字符一致**。
 折叠一轮后若仍超预算（比如"字段很多但每个都不大"），会按梯度收紧阈值重试，
 最多 `escalate_rounds=3` 轮。升级只会收紧**已启用**的规则——关闭状态的
 `max_object_keys` 不会被偷偷打开。
+
+对 JSON 中被解码成字符串的二进制缓冲区，可启用 `fold_binary_strings=True`。
+含非空白 ASCII 控制字符的字符串即使整体 JSON 未超预算也会折叠并保存完整文件；
+普通换行、回车和制表符不触发此规则。完整文件保留原字符串，不做类型转换。
 
 丢字段是唯一**默认关闭**的规则：其他规则触发时都会在原地留下可见的占位符，
 但被省略的字段是**直接消失**的——Agent 根本看不出它存在，而字段名正是
@@ -332,6 +337,33 @@ SerializeConfig(max_object_keys=20)
 没有任何折叠发生时，输出与 `json.dumps(indent=2, ensure_ascii=False)` 逐字符相同。
 
 ## 配置与钩子
+
+### 自定义业务折叠
+
+`fold_hook(path, value)` 接收字段路径（键或列表下标组成的 tuple，根节点是 `()`）
+和当前值。返回 `None` 继续默认规则，返回 `Folded(preview, note, kind)` 则使用
+最终预览，不再对该预览执行默认规则。完整文件和 SDK 仍来自原始输入。
+钩子即使在数据未超预算时也会执行；此时未命中的字段保持原样。
+
+```python
+from progressive_serializer import Folded, SerializeConfig, serialize_value
+
+def hide_successes(path, value):
+    if path == ("tests",) and isinstance(value, list):
+        failed = [item for item in value if item.get("result") is not True]
+        return Folded(failed, "成功记录已折叠", "custom")
+    return None
+
+serialize_value(data, "/tmp/result.json", SerializeConfig(fold_hook=hide_successes))
+```
+
+钩子必须无副作用：预算升级会重复调用。异常直接传给调用方，非法返回值抛
+`TypeError`。最终预览可包含嵌套 `Folded`；若仍需折叠预览中的大字段，可调用
+`fold(value, config)`，但务必使用 `fold_hook=None` 的配置避免递归。
+重要字段优先于预算：钩子返回的最终预览不会被预算升级截断。
+如果预览只是添加注释或保护字段，没有省略数据，使用
+`Folded(preview, note, kind, elided=False)`。此时不生成完整 JSON、SDK 或
+完整文件提示；嵌套预览中若实际省略了数据，外层仍应使用 `elided=True`。
 
 ```python
 from progressive_serializer import SerializeConfig, serialize

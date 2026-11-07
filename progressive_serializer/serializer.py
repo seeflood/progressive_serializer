@@ -13,7 +13,7 @@ from typing import Any, Mapping, Optional
 
 from . import jsonc
 from .config import SerializeConfig
-from .fold import fold
+from .fold import fold, is_binary_string
 from .render import ItemView, OverviewContext, StringTemplateRenderer
 from .sdk_gen import generate_sdk
 
@@ -81,7 +81,10 @@ def serialize(
         )
         original_size = config.size_fn(full_text)
 
-        if original_size <= config.max_value_size:
+        apply_defaults = (
+            original_size > config.max_value_size or _has_binary_strings(value, config)
+        )
+        if not apply_defaults and config.fold_hook is None:
             items.append(
                 ItemView(
                     key=str(key),
@@ -97,7 +100,8 @@ def serialize(
         # Fenced markdown block: nothing can be mistaken for a "//" comment's
         # continuation, so the compact style is the better default here.
         _, block, folded = _fold_to_budget(
-            value, config, config.comment_style or jsonc.LINE
+            value, config, config.comment_style or jsonc.LINE,
+            apply_defaults=apply_defaults,
         )
         full_path: Optional[str] = None
         sdk_path: Optional[str] = None
@@ -198,10 +202,16 @@ def serialize_value(
         ensure_ascii=config.ensure_ascii,
         default=_dump_default(config),
     )
-    if config.size_fn(full_text) <= config.max_value_size:
+    apply_defaults = (
+        config.size_fn(full_text) > config.max_value_size
+        or _has_binary_strings(value, config)
+    )
+    if not apply_defaults and config.fold_hook is None:
         return full_text
 
-    tree, block, folded = _fold_to_budget(value, config, style)
+    tree, block, folded = _fold_to_budget(
+        value, config, style, apply_defaults=apply_defaults,
+    )
     if not folded:
         # Over budget yet no rule fired (e.g. a wide object with
         # max_object_keys disabled). Nothing was elided, so there is nothing to
@@ -255,8 +265,25 @@ def _one_line(text: str) -> str:
     return " ".join(text.split())
 
 
+def _has_binary_strings(value: Any, config: SerializeConfig) -> bool:
+    """Opt-in binary string folding also applies to otherwise small payloads."""
+    if not config.fold_binary_strings:
+        return False
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str) and is_binary_string(item):
+            return True
+        if isinstance(item, dict):
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
+    return False
+
+
 def _fold_to_budget(
-    value: Any, config: SerializeConfig, style: str = jsonc.LINE
+    value: Any, config: SerializeConfig, style: str = jsonc.LINE, *,
+    apply_defaults: bool = True,
 ) -> tuple[Any, str, bool]:
     """Fold ``value``, tightening thresholds until it fits the budget.
 
@@ -276,7 +303,7 @@ def _fold_to_budget(
     block = ""
     folded = False
     for _ in range(max(1, config.escalate_rounds + 1)):
-        tree, stats = fold(value, current)
+        tree, stats = fold(value, current, apply_defaults=apply_defaults)
         block = jsonc.dumps(
             tree,
             indent=config.indent,

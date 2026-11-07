@@ -41,6 +41,8 @@ class Folded:
     preview: Any
     note: str
     kind: str
+    # Final previews may protect data or add notes without eliding any content.
+    elided: bool = True
 
 
 @dataclass
@@ -55,24 +57,48 @@ class FoldStats:
         self.notes += 1
 
 
-def fold(value: Any, config: SerializeConfig) -> tuple[Any, FoldStats]:
+def fold(value: Any, config: SerializeConfig, *,
+         apply_defaults: bool = True) -> tuple[Any, FoldStats]:
     """Fold ``value`` per ``config``, returning the tree and what was elided."""
     stats = FoldStats()
-    tree = _walk(value, config, stats, depth=0)
+    tree = _walk(value, config, stats, depth=0, path=(),
+                 apply_defaults=apply_defaults)
     return tree, stats
 
 
-def _walk(value: Any, config: SerializeConfig, stats: FoldStats, depth: int) -> Any:
+def _walk(value: Any, config: SerializeConfig, stats: FoldStats, depth: int,
+          path: tuple, apply_defaults: bool) -> Any:
     value = _coerce(value, config)
 
+    if config.fold_hook is not None:
+        custom = config.fold_hook(path, value)
+        if custom is not None:
+            if not isinstance(custom, Folded):
+                raise TypeError("fold_hook must return Folded or None")
+            if custom.elided:
+                stats.record()
+            return custom
+    if not apply_defaults:
+        if isinstance(value, dict):
+            return {
+                _dict_key(k): _walk(v, config, stats, depth + 1,
+                                    path + (_dict_key(k),), False)
+                for k, v in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [_walk(v, config, stats, depth + 1, path + (i,), False)
+                    for i, v in enumerate(value)]
+        if isinstance(value, _BINARY_TYPES):
+            return base64.b64encode(bytes(value)).decode("ascii")
+        return value
     if isinstance(value, _BINARY_TYPES):
         return _fold_binary(value, config, stats)
     if isinstance(value, str):
         return _fold_string(value, config, stats)
     if isinstance(value, dict):
-        return _fold_dict(value, config, stats, depth)
+        return _fold_dict(value, config, stats, depth, path)
     if isinstance(value, (list, tuple)):
-        return _fold_list(list(value), config, stats, depth)
+        return _fold_list(list(value), config, stats, depth, path)
     # bool/int/float/None render as-is; everything else was coerced above.
     return value
 
@@ -123,6 +149,15 @@ def _fold_binary(value: Any, config: SerializeConfig, stats: FoldStats) -> Any:
 
 
 def _fold_string(value: str, config: SerializeConfig, stats: FoldStats) -> Any:
+    if config.fold_binary_strings and is_binary_string(value):
+        stats.record()
+        return Folded(
+            preview=ELLIPSIS,
+            note=config.messages.binary_folded.format(
+                type_name="str", size=len(value.encode("utf-8")), s=""
+            ),
+            kind="binary",
+        )
     if len(value) <= config.max_string_len:
         return value
     stats.record()
@@ -135,8 +170,16 @@ def _fold_string(value: str, config: SerializeConfig, stats: FoldStats) -> Any:
     )
 
 
+def is_binary_string(value: str) -> bool:
+    """Conservatively recognize control-laden text, not ordinary multiline text."""
+    return any(
+        (ord(char) < 32 and char not in "\t\n\r") or ord(char) == 127
+        for char in value
+    )
+
+
 def _fold_dict(
-    value: dict, config: SerializeConfig, stats: FoldStats, depth: int
+    value: dict, config: SerializeConfig, stats: FoldStats, depth: int, path: tuple
 ) -> Any:
     if depth >= config.max_depth:
         stats.record()
@@ -155,7 +198,8 @@ def _fold_dict(
         keys = keys[: config.max_object_keys]
 
     preview = {
-        _dict_key(k): _walk(value[k], config, stats, depth + 1) for k in keys
+        _dict_key(k): _walk(value[k], config, stats, depth + 1,
+                            path + (_dict_key(k),), True) for k in keys
     }
     if not dropped:
         return preview
@@ -188,7 +232,7 @@ def _dict_key(key: Any) -> str:
 
 
 def _fold_list(
-    value: list, config: SerializeConfig, stats: FoldStats, depth: int
+    value: list, config: SerializeConfig, stats: FoldStats, depth: int, path: tuple
 ) -> Any:
     if depth >= config.max_depth:
         stats.record()
@@ -201,10 +245,12 @@ def _fold_list(
         )
 
     if len(value) <= config.max_list_items:
-        return [_walk(item, config, stats, depth + 1) for item in value]
+        return [_walk(item, config, stats, depth + 1, path + (i,), True)
+                for i, item in enumerate(value)]
 
     keep = max(1, min(config.list_preview_items, len(value)))
-    preview = [_walk(item, config, stats, depth + 1) for item in value[:keep]]
+    preview = [_walk(item, config, stats, depth + 1, path + (i,), True)
+               for i, item in enumerate(value[:keep])]
     # Trailing sentinel so the elision is visible in the structure itself, not
     # only in the comment.
     preview.append(ELLIPSIS)
